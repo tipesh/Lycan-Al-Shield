@@ -1,0 +1,242 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Create Minimal Android Project Structure
+      run: |
+        mkdir -p app/src/main/java/com/mysuperapp/ai app/src/main/res/values app/src/main/res/mipmap
+        
+        # AndroidManifest.xml
+        cat << 'EOF' > app/src/main/AndroidManifest.xml
+        <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+            package="com.mysuperapp.ai">
+            <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+            <uses-permission android:name="android.permission.INTERNET" />
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+            <application
+                android:allowBackup="false"
+                android:label="Ultra AI Shield"
+                android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+                <activity android:name=".MainActivity" android:exported="true">
+                    <intent-filter>
+                        <action android:name="android.intent.action.MAIN" />
+                        <category android:name="android.intent.category.LAUNCHER" />
+                    </intent-filter>
+                </activity>
+                <service android:name=".AppFirewallService"
+                    android:permission="android.permission.BIND_VPN_SERVICE"
+                    android:exported="false">
+                    <intent-filter>
+                        <action android:name="android.net.VpnService" />
+                    </intent-filter>
+                </service>
+            </application>
+        </manifest>
+        EOF
+
+        # build.gradle (Module: app)
+        cat << 'EOF' > app/build.gradle
+        plugins {
+            id 'com.android.application'
+            id 'org.jetbrains.kotlin.android'
+        }
+        android {
+            namespace 'com.mysuperapp.ai'
+            compileSdk 34
+            defaultConfig {
+                applicationId "com.mysuperapp.ai"
+                minSdk 24
+                targetSdk 34
+                versionCode 1
+                versionName "1.0"
+            }
+            buildFeatures {
+                compose true
+            }
+            composeOptions {
+                kotlinCompilerExtensionVersion '1.5.8'
+            }
+        }
+        dependencies {
+            implementation 'androidx.core:core-ktx:1.12.0'
+            implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
+            implementation 'androidx.activity:activity-compose:1.8.2'
+            implementation platform('androidx.compose:compose-bom:2023.10.01')
+            implementation 'androidx.compose.ui:ui'
+            implementation 'androidx.compose.material3:material3'
+        }
+        EOF
+
+        # build.gradle (Project level)
+        cat << 'EOF' > build.gradle
+        plugins {
+            id 'com.android.application' version '8.2.0' apply false
+            id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+        }
+        EOF
+
+        # settings.gradle
+        cat << 'EOF' > settings.gradle
+        pluginManagement {
+            repositories {
+                google()
+                mavenCentral()
+                gradlePluginPortal()
+            }
+        }
+        dependencyResolutionManagement {
+            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+            repositories {
+                google()
+                mavenCentral()
+            }
+        }
+        rootname = "UltraAIShield"
+        include ':app'
+        EOF
+
+        # gradle.properties
+        echo "android.useAndroidX=true" > gradle.properties
+
+        # MainActivity.kt
+        mkdir -p app/src/main/java/com/mysuperapp/ai
+        cat << 'EOF' > app/src/main/java/com/mysuperapp/ai/MainActivity.kt
+        package com.mysuperapp.ai
+
+        import android.app.Activity
+        import android.content.Context
+        import android.content.Intent
+        import android.content.pm.ApplicationInfo
+        import android.content.pm.PackageManager
+        import android.net.VpnService
+        import android.os.Bundle
+        import androidx.activity.ComponentActivity
+        import androidx.activity.compose.setContent
+        import androidx.activity.result.contract.ActivityResultContracts
+        import androidx.compose.foundation.layout.*
+        import androidx.compose.foundation.lazy.LazyColumn
+        import androidx.compose.foundation.lazy.items
+        import androidx.compose.material3.*
+        import androidx.compose.runtime.*
+        import androidx.compose.ui.Alignment
+        import androidx.compose.ui.Modifier
+        import androidx.compose.ui.graphics.Color
+        import androidx.compose.ui.text.font.FontWeight
+        import androidx.compose.ui.unit.dp
+        import androidx.compose.ui.unit.sp
+
+        data class AppItem(val appName: String, val packageName: String, var isInternetAllowed: Boolean)
+
+        class MainActivity : ComponentActivity() {
+            private val vpnPermissionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+                if (result.resultCode == Activity.RESULT_OK) { updateFirewallService() }
+            }
+            override fun onCreate(savedInstanceState: Bundle?) {
+                super.onCreate(savedInstanceState)
+                val installedApps = getInstalledUserApps()
+                setContent {
+                    MaterialTheme {
+                        Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF121212)) {
+                            AppControllerScreen(apps = installedApps, onToggleInternet = { pkg, allow -> toggleAppInternet(pkg, allow) })
+                        }
+                    }
+                }
+            }
+            private fun getInstalledUserApps(): List<AppItem> {
+                val pm = packageManager
+                val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                val appList = mutableListOf<AppItem>()
+                val prefs = getSharedPreferences("FirewallPrefs", Context.MODE_PRIVATE)
+                for (appInfo in packages) {
+                    if (appInfo.packageName != packageName) {
+                        val name = pm.getApplicationLabel(appInfo).toString()
+                        val isBlocked = prefs.getBoolean(appInfo.packageName, false)
+                        if (isBlocked) { AppFirewallService.blockedApps.add(appInfo.packageName) }
+                        appList.add(AppItem(name, appInfo.packageName, !isBlocked))
+                    }
+                }
+                return appList.sortedBy { it.appName }
+            }
+            private fun toggleAppInternet(packageName: String, allowInternet: Boolean) {
+                val prefs = getSharedPreferences("FirewallPrefs", Context.MODE_PRIVATE)
+                prefs.edit().putBoolean(packageName, !allowInternet).apply()
+                if (allowInternet) { AppFirewallService.blockedApps.remove(packageName) }
+                else { AppFirewallService.blockedApps.add(packageName) }
+                val intent = VpnService.prepare(this)
+                if (intent != null) { vpnPermissionLauncher.launch(intent) } else { updateFirewallService() }
+            }
+            private fun updateFirewallService() {
+                startService(Intent(this, AppFirewallService::class.java))
+            }
+        }
+
+        class AppFirewallService : VpnService() {
+            private var vpnInterface: android.os.ParcelFileDescriptor? = null
+            companion object {
+                val blockedApps = mutableSetOf<String>()
+            }
+            override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                startFirewall()
+                return START_STICKY
+            }
+            private fun startFirewall() {
+                vpnInterface?.close()
+                val builder = Builder().setSession("UltraDataBlocker").addAddress("10.0.0.2", 32).addRoute("0.0.0.0", 0)
+                for (pkg in blockedApps) {
+                    try { builder.addAllowedApplication(pkg) } catch (e: Exception) { e.printStackTrace() }
+                }
+                if (blockedApps.isNotEmpty()) { vpnInterface = builder.establish() }
+            }
+            override fun onDestroy() {
+                vpnInterface?.close()
+                super.onDestroy()
+            }
+        }
+
+        @Composable
+        fun AppControllerScreen(apps: List<AppItem>, onToggleInternet: (String, Boolean) -> Unit) {
+            Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                Text(text = "🛡️ अल्ट्रा डेटा और ऐप कंट्रोलर", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
+                Text(text = "स्विच बंद (OFF) करते ही उस ऐप का इंटरनेट कट जाएगा।", color = Color.Gray, fontSize = 14.sp, modifier = Modifier.padding(bottom = 16.dp))
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    items(apps, key = { it.packageName }) { app ->
+                        var isAllowed by remember { mutableStateOf(app.isInternetAllowed) }
+                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))) {
+                            Row(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(text = app.appName, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                                    Text(text = if (isAllowed) "इंटरनेट चालू (ON)" else "इंटरनेट ब्लॉक (OFF)", color = if (isAllowed) Color(0xFF4CAF50) else Color(0xFFFF5252), fontSize = 12.sp)
+                                }
+                                Switch(checked = isAllowed, onCheckedChange = { newValue -> isAllowed = newValue; onToggleInternet(app.packageName, newValue) })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        EOF
+
+    - name: Build APK with Gradle
+      run: ./gradlew assembleDebug
+
+    - name: Upload APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-debug
+        path: app/build/outputs/apk/debug/app-debug.apk
